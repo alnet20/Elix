@@ -1,5 +1,13 @@
+import { randomUUID } from 'node:crypto';
 import { parseBody } from './_shared/utils.mjs';
 import { connectJobStore, assertJobId, setJob } from './_shared/jobs.mjs';
+import {
+  assertTransferId,
+  assertChunkCount,
+  readInputTransfer,
+  deleteInputTransfer,
+  putOutputAudio,
+} from './_shared/audio-store.mjs';
 import { runGeminiLiveAudio, finalizeAudio } from './_shared/live-audio.mjs';
 
 const MAX_SECONDS = 30;
@@ -8,44 +16,83 @@ const MAX_BYTES = MAX_SECONDS * INPUT_RATE * 2 + 4096;
 const LANG_RX = /^[\p{L}\p{M} .,'’()\-]{2,80}$/u;
 
 function validate(body) {
-  const b64 = String(body.audio_base64 || '').trim();
   const target = String(body.target_language || '').trim();
-  if (!b64) {
-    const err = new Error('No se recibió audio para traducir.');
-    err.statusCode = 400;
-    throw err;
-  }
   if (!target || !LANG_RX.test(target)) {
     const err = new Error('Selecciona un idioma de destino válido.');
     err.statusCode = 400;
     throw err;
   }
-  const approxBytes = Math.floor(b64.length * 0.75);
+
+  const transferRaw = String(body.audio_transfer_id || '').trim();
+  const directB64 = String(body.audio_base64 || '').trim();
+  if (!transferRaw && !directB64) {
+    const err = new Error('No se recibió audio para traducir.');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (transferRaw) {
+    return {
+      target,
+      transferId: assertTransferId(transferRaw),
+      totalChunks: assertChunkCount(body.audio_chunks),
+      directB64: '',
+    };
+  }
+
+  const approxBytes = Math.floor(directB64.length * 0.75);
   if (approxBytes > MAX_BYTES) {
-    const err = new Error(`La traducción de audio admite hasta ${MAX_SECONDS} segundos por solicitud en esta versión segura.`);
+    const err = new Error(`La traducción de audio admite hasta ${MAX_SECONDS} segundos por solicitud.`);
     err.statusCode = 413;
     throw err;
   }
-  return { b64, target };
+  return { target, transferId: '', totalChunks: 0, directB64 };
+}
+
+function outputId() {
+  return `elixout-${randomUUID()}`.replace(/[^A-Za-z0-9_-]/g, '');
 }
 
 export const handler = async (event) => {
+  // connectJobStore configura @netlify/blobs para esta invocación; el almacén
+  // de audio comparte esa misma conexión, pero usa un Store independiente.
   connectJobStore(event);
   let jobId = '';
+  let transferId = '';
+  let totalChunks = 0;
+
   try {
     const body = parseBody(event);
     jobId = assertJobId(body.job_id);
-    const { b64: audioBase64, target } = validate(body);
+    const validated = validate(body);
+    transferId = validated.transferId;
+    totalChunks = validated.totalChunks;
 
     await setJob(jobId, {
       status: 'running',
       provider: 'elix',
       engine: 'elix-audio-translate',
-      progress: `Elix AI traduciendo el audio a ${target}.`,
+      progress: `Elix AI traduciendo el audio a ${validated.target}.`,
       started_at: new Date().toISOString(),
     });
 
-    const instruction = `Traduce fielmente todo el contenido hablado del audio al idioma de destino: ${target}. Mantén el significado, nombres propios, cifras, unidades y tono comunicativo. No resumas ni añadas información. Devuelve únicamente el audio hablado de la traducción, sin introducciones ni comentarios.`;
+    const audioBase64 = transferId
+      ? await readInputTransfer(transferId, totalChunks)
+      : validated.directB64;
+
+    const approxBytes = Math.floor(audioBase64.length * 0.75);
+    if (!approxBytes) {
+      const err = new Error('El audio recibido está vacío.');
+      err.statusCode = 400;
+      throw err;
+    }
+    if (approxBytes > MAX_BYTES) {
+      const err = new Error(`El audio supera el límite seguro de ${MAX_SECONDS} segundos.`);
+      err.statusCode = 413;
+      throw err;
+    }
+
+    const instruction = `Traduce fielmente todo el contenido hablado del audio al idioma de destino: ${validated.target}. Mantén el significado, nombres propios, cifras, unidades y tono comunicativo. No resumas ni añadas información. Devuelve únicamente el audio hablado de la traducción, sin introducciones ni comentarios.`;
 
     const { collector } = await runGeminiLiveAudio({
       modelEnv: 'GEMINI_TRANSLATE_LIVE_MODEL',
@@ -61,14 +108,18 @@ export const handler = async (event) => {
     const translatedText = [...(collector?.text || []), ...(collector?.transcripts || [])]
       .map(s => String(s || '').trim()).filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
 
+    const outId = outputId();
+    await putOutputAudio({ outputId: outId, buffer: audio.buffer, mimeType: audio.mimeType });
+
     await setJob(jobId, {
       status: 'done',
       provider: 'elix',
       engine: 'elix-audio-translate',
       result: {
-        audio_base64: audio.buffer.toString('base64'),
+        audio_id: outId,
+        audio_url: `/.netlify/functions/elix-audio-result?id=${encodeURIComponent(outId)}`,
         mime_type: audio.mimeType,
-        target_language: target,
+        target_language: validated.target,
         text: translatedText || '',
       },
       finished_at: new Date().toISOString(),
@@ -88,6 +139,11 @@ export const handler = async (event) => {
       } catch (storeError) {
         console.error('No se pudo guardar el error del job de traducción:', storeError);
       }
+    }
+  } finally {
+    if (transferId && totalChunks) {
+      try { await deleteInputTransfer(transferId, totalChunks); }
+      catch (cleanupError) { console.warn('Elix AI no pudo limpiar fragmentos temporales de audio:', cleanupError?.message || cleanupError); }
     }
   }
 };
