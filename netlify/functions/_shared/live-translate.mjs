@@ -248,20 +248,22 @@ export async function runGeminiLiveTranslate({
     finishError(Object.assign(new Error(detail ? `Se interrumpió Live Translate: ${detail}` : 'Se interrumpió Live Translate.'), { statusCode: 502 }));
   });
 
-  // Estructura oficial de Google para gemini-3.5-live-translate-preview:
-  // translationConfig va DENTRO de generationConfig. Live Translate no usa
-  // systemInstruction: se configura exclusivamente con el idioma objetivo.
+  // Gemini Live Translate (v1beta): el runtime actual acepta
+  // inputAudioTranscription/outputAudioTranscription directamente en setup,
+  // mientras translationConfig pertenece a generationConfig. Esta forma evita
+  // el cierre 1007 observado cuando las transcripciones se anidan dentro de
+  // generationConfig. Este helper es exclusivo de traducción; no toca dictado.
   const setup = {
     model: `models/${model}`,
     generationConfig: {
       responseModalities: ['AUDIO'],
-      inputAudioTranscription: {},
-      outputAudioTranscription: {},
       translationConfig: {
         targetLanguageCode: String(targetLanguageCode || '').trim(),
         echoTargetLanguage: false,
       },
     },
+    inputAudioTranscription: {},
+    outputAudioTranscription: {},
   };
 
   ws.send(JSON.stringify({ setup }));
@@ -304,9 +306,20 @@ export async function runGeminiLiveTranslate({
 
   inputFinished = true;
 
-  // Live Translate funciona como flujo continuo, no por turnos. Para un archivo
-  // pregrabado, terminamos cuando ya se envió todo el audio y la salida dejó de
-  // crecer durante un intervalo breve. No se envían activityStart/activityEnd.
+  // Para un archivo pregrabado el flujo sí tiene un final físico. Con la
+  // detección automática de actividad activa (valor predeterminado), la Live API
+  // permite señalarlo mediante audioStreamEnd para que el servidor vacíe la
+  // traducción pendiente sin esperar indefinidamente más audio.
+  if (!finished && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      realtimeInput: {
+        audioStreamEnd: true,
+      },
+    }));
+  }
+
+  // Live Translate funciona como flujo continuo. Para este archivo pregrabado,
+  // cerramos cuando la salida dejó de crecer durante un intervalo breve.
   const quietWatcher = setInterval(() => {
     if (finished || !inputFinished || !collector.audio.length || !collector.lastAudioAt) return;
     if (Date.now() - collector.lastAudioAt > 1800) finishOk();
