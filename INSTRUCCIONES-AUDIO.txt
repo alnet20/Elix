@@ -1,0 +1,23 @@
+ELIX AI — PARCHE DE AUDIO
+===========================
+
+Este parche añade dos funciones sin reemplazar el flujo principal:
+1) Dictado por voz -> texto en el cuadro del chat.
+2) Traducción de un archivo de audio -> audio traducido al idioma seleccionado.
+
+Archivos:
+- index.html (módulo de interfaz de audio añadido al final, sin reemplazar enviarMensaje)
+- package.json (añade la dependencia ws)
+- netlify/functions/elix-audio-transcribe-background.mjs
+- netlify/functions/elix-audio-translate-background.mjs
+- netlify/functions/_shared/live-audio.mjs
+
+Variables de entorno:
+- Reutiliza GEMINI_API_KEY existente.
+- Añadir GEMINI_TRANSCRIBE_LIVE_MODEL = ID API exacto de Gemini 3.5 Transcribe Live.
+- Añadir GEMINI_TRANSLATE_LIVE_MODEL = ID API exacto de Gemini 3.5 Live Translate.
+Opcional:
+- GEMINI_LIVE_WS_URL = endpoint WebSocket de Gemini Live, solo si Google indica uno distinto al v1beta usado por defecto.
+
+IMPORTANTE:
+No se ha inventado ni fijado un ID de modelo no verificado. Usa exactamente los identificadores de API que muestre Google AI Studio / documentación para esos modelos.

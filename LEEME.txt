@@ -1,0 +1,37 @@
+ELIX AI — ROUTER DE EXPORTACIÓN CON GROQ
+
+Reemplaza el proyecto con el contenido de esta carpeta y vuelve a desplegar en Netlify.
+
+Variables de entorno del núcleo:
+- DEEPSEEK_API_KEY
+- GEMINI_API_KEY
+- TAVILY_API_KEY
+
+Router inteligente de exportación:
+- GROQ_API_KEY (recomendada)
+
+GROQ_API_KEY se usa ÚNICAMENTE para decidir si una orden significa:
+1) exportar el chat actual,
+2) exportar un chat específico,
+3) generar contenido primero y exportarlo al terminar.
+
+Si GROQ_API_KEY falta o Groq no responde, Elix AI usa un clasificador local de respaldo y el chat sigue funcionando; la Function del router no devuelve un 500 por ese motivo.
+
+En solicitudes de tipo "investiga X y hazme un Word", DeepSeek recibe únicamente la tarea limpia ("investiga X"). La frase de exportación no se envía al modelo principal. Cuando la respuesta termina correctamente, Elix AI genera y descarga el documento.
+
+Importante: las variables deben estar disponibles para Netlify Functions en producción. Después de cambiar variables, realiza un nuevo deploy.
+
+
+NUEVA FUNCIÓN: GENERACIÓN DE IMÁGENES EN EL CHAT
+- Archivo nuevo: netlify/functions/elix-image-background.mjs
+- Variables de entorno aceptadas para imágenes (usa una de ellas):
+  * META_IMAGE_API_KEY
+  * MUSE_IMAGE_API_KEY
+  * HUGGINGFACE_API_KEY
+  * HF_API_KEY
+- Opcionales:
+  * MUSE_IMAGE_MODEL (por defecto: facebook/muse)
+  * MUSE_IMAGE_API_URL (si usas un endpoint compatible distinto)
+  * MUSE_IMAGE_PROVIDER (huggingface u openai)
+  * MUSE_GUIDANCE_SCALE
+  * MUSE_STEPS

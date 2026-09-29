@@ -1,0 +1,9 @@
+{
+  "name": "elix-ai-netlify",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@netlify/blobs": "latest",
+    "ws": "8.18.0"
+  }
+}
