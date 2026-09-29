@@ -159,6 +159,7 @@ async function runLiveOnce({
 }) {
   const ws = await openSocket(liveEndpoint(apiKey));
   const collector = { text: [], transcripts: [], audio: [], audioMime: '' };
+  const cleanModel = String(model || '').replace(/^models\//, '');
   let finished = false;
   let setupDone = false;
   let firstContentAt = 0;
@@ -204,23 +205,48 @@ async function runLiveOnce({
     }
   });
 
-  ws.addEventListener('close', () => {
+  ws.addEventListener('close', event => {
     if (finished) return;
     const hasData = collector.text.length || collector.transcripts.length || collector.audio.length;
     finished = true;
     clearTimeout(hardTimer);
-    if (hasData) resolveRun(collector);
-    else rejectRun(Object.assign(new Error('Gemini Live cerró la conexión sin devolver contenido de audio.'), { statusCode: 502 }));
+    if (hasData) {
+      resolveRun(collector);
+      return;
+    }
+
+    // Diagnóstico seguro: conserva únicamente datos de protocolo.
+    // No registra la API key ni el contenido del audio.
+    const code = Number(event?.code || 0);
+    const reason = String(event?.reason || '').trim().replace(/\s+/g, ' ').slice(0, 500);
+    const setupState = setupDone ? 'confirmado' : 'no confirmado';
+    const detail = [
+      `código ${code || 'desconocido'}`,
+      reason ? `motivo: ${reason}` : '',
+      `modelo: ${cleanModel || 'desconocido'}`,
+      `esquema: ${schema}`,
+      `setup: ${setupState}`,
+    ].filter(Boolean).join(' · ');
+
+    console.error('Elix AI · Gemini Live cierre remoto:', detail);
+    rejectRun(Object.assign(
+      new Error(`Gemini Live cerró la conexión sin devolver contenido (${detail}).`),
+      { statusCode: 502, wsCode: code || undefined, wsReason: reason || undefined }
+    ));
   });
 
-  ws.addEventListener('error', () => {
+  ws.addEventListener('error', event => {
     if (finished) return;
     finished = true;
     clearTimeout(hardTimer);
-    rejectRun(Object.assign(new Error('Se interrumpió la conexión de audio con Gemini Live.'), { statusCode: 502 }));
+    const detail = String(event?.error?.message || event?.message || '').trim().replace(/\s+/g, ' ').slice(0, 500);
+    console.error('Elix AI · Gemini Live error de WebSocket:', detail || 'sin detalle adicional');
+    rejectRun(Object.assign(
+      new Error(detail ? `Se interrumpió la conexión de audio con Gemini Live: ${detail}` : 'Se interrumpió la conexión de audio con Gemini Live.'),
+      { statusCode: 502 }
+    ));
   });
 
-  const cleanModel = String(model || '').replace(/^models\//, '');
   ws.send(JSON.stringify({
     setup: {
       model: `models/${cleanModel}`,
