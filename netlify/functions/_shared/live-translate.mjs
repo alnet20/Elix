@@ -24,9 +24,9 @@ function requireTranslateModel() {
 }
 
 function endpoint(apiKey) {
-  // Este helper es exclusivo de Live Translate. No utiliza GEMINI_LIVE_WS_URL
-  // para no alterar ni depender del endpoint del dictado que ya funciona.
-  const base = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent';
+  // Endpoint oficial documentado para Gemini 3.5 Live Translate por WebSocket.
+  // Es exclusivo de este helper y no modifica el endpoint usado por el dictado.
+  const base = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
   return `${base}?key=${encodeURIComponent(apiKey)}`;
 }
 
@@ -67,6 +67,15 @@ function extractServerContent(message, collector) {
     }
   }
 
+  const inputTranscript =
+    server.inputTranscription?.text ||
+    server.input_transcription?.text ||
+    message.inputTranscription?.text ||
+    '';
+  if (typeof inputTranscript === 'string' && inputTranscript.trim()) {
+    collector.inputTranscripts.push(inputTranscript);
+  }
+
   const outputTranscript =
     server.outputTranscription?.text ||
     server.output_transcription?.text ||
@@ -75,11 +84,6 @@ function extractServerContent(message, collector) {
   if (typeof outputTranscript === 'string' && outputTranscript.trim()) {
     collector.transcripts.push(outputTranscript);
   }
-}
-
-function turnComplete(message) {
-  const server = message?.serverContent || message?.server_content || {};
-  return Boolean(server.turnComplete || server.turn_complete || server.generationComplete || server.generation_complete);
 }
 
 function setupComplete(message) {
@@ -142,7 +146,6 @@ async function openSocket(url, timeoutMs = 15000) {
 }
 
 export async function runGeminiLiveTranslate({
-  instruction,
   targetLanguageCode,
   audioBase64,
   inputRate = 16000,
@@ -151,11 +154,18 @@ export async function runGeminiLiveTranslate({
   const apiKey = getGeminiApiKey();
   const model = requireTranslateModel();
   const ws = await openSocket(endpoint(apiKey));
-  const collector = { text: [], transcripts: [], audio: [], audioMime: '', lastAudioAt: 0 };
+  const collector = {
+    text: [],
+    inputTranscripts: [],
+    transcripts: [],
+    audio: [],
+    audioMime: '',
+    lastAudioAt: 0,
+  };
 
   let finished = false;
   let setupDone = false;
-  let activityEnded = false;
+  let inputFinished = false;
   let resolveRun;
   let rejectRun;
 
@@ -181,7 +191,13 @@ export async function runGeminiLiveTranslate({
   };
 
   const hardTimer = setTimeout(() => {
-    const detail = `setup: ${setupDone ? 'confirmado' : 'no confirmado'} · actividad: ${activityEnded ? 'cerrada' : 'abierta'} · audio salida: ${collector.audio.length} chunks`;
+    const detail = [
+      `setup: ${setupDone ? 'confirmado' : 'no confirmado'}`,
+      `entrada: ${inputFinished ? 'enviada' : 'en curso'}`,
+      `transcripción entrada: ${collector.inputTranscripts.length ? 'sí' : 'no'}`,
+      `transcripción salida: ${collector.transcripts.length ? 'sí' : 'no'}`,
+      `audio salida: ${collector.audio.length} chunks`,
+    ].join(' · ');
     console.error('Elix AI · Live Translate timeout:', detail);
     finishError(Object.assign(new Error(`Elix AI agotó el tiempo de procesamiento de audio (${detail}).`), { statusCode: 504 }));
   }, timeoutMs);
@@ -202,11 +218,6 @@ export async function runGeminiLiveTranslate({
     }
 
     extractServerContent(message, collector);
-
-    if (turnComplete(message)) {
-      if (collector.audio.length) finishOk();
-      else finishError(Object.assign(new Error('Live Translate terminó el turno sin devolver audio traducido.'), { statusCode: 502 }));
-    }
   });
 
   ws.addEventListener('close', event => {
@@ -222,7 +233,6 @@ export async function runGeminiLiveTranslate({
       reason ? `motivo: ${reason}` : '',
       `modelo: ${model}`,
       `setup: ${setupDone ? 'confirmado' : 'no confirmado'}`,
-      `actividad: ${activityEnded ? 'cerrada' : 'abierta'}`,
     ].filter(Boolean).join(' · ');
     console.error('Elix AI · Live Translate cierre remoto:', detail);
     finishError(Object.assign(new Error(`Live Translate cerró la conexión sin devolver audio (${detail}).`), {
@@ -238,24 +248,18 @@ export async function runGeminiLiveTranslate({
     finishError(Object.assign(new Error(detail ? `Se interrumpió Live Translate: ${detail}` : 'Se interrumpió Live Translate.'), { statusCode: 502 }));
   });
 
-  // Para audio pregrabado cerramos el turno de forma explícita. Con VAD automático,
-  // un archivo que termina inmediatamente después de la voz puede quedarse esperando
-  // silencio indefinidamente. Manual activityStart/activityEnd evita ese caso.
+  // Estructura oficial de Google para gemini-3.5-live-translate-preview:
+  // translationConfig va DENTRO de generationConfig. Live Translate no usa
+  // systemInstruction: se configura exclusivamente con el idioma objetivo.
   const setup = {
     model: `models/${model}`,
     generationConfig: {
       responseModalities: ['AUDIO'],
-      temperature: 0,
-    },
-    systemInstruction: {
-      parts: [{ text: String(instruction || '') }],
-    },
-    translationConfig: {
-      targetLanguageCode: String(targetLanguageCode || '').trim(),
-    },
-    realtimeInputConfig: {
-      automaticActivityDetection: {
-        disabled: true,
+      inputAudioTranscription: {},
+      outputAudioTranscription: {},
+      translationConfig: {
+        targetLanguageCode: String(targetLanguageCode || '').trim(),
+        echoTargetLanguage: false,
       },
     },
   };
@@ -275,9 +279,7 @@ export async function runGeminiLiveTranslate({
     return await done;
   }
 
-  // Marca explícitamente el comienzo de la intervención hablada.
-  ws.send(JSON.stringify({ realtimeInput: { activityStart: {} } }));
-
+  // Google recomienda PCM16 mono 16 kHz, little-endian, en chunks de 100 ms.
   const bytesPerSecond = Math.max(1, Number(inputRate) || 16000) * 2;
   const chunkMs = 100;
   const chunkBytes = Math.max(320, Math.round(bytesPerSecond * (chunkMs / 1000)));
@@ -286,13 +288,11 @@ export async function runGeminiLiveTranslate({
     const startedAt = Date.now();
     const chunk = audio.subarray(offset, Math.min(audio.length, offset + chunkBytes)).toString('base64');
 
-    // La forma "audio" corresponde al envío de audio en tiempo real del protocolo
-    // Live actual; se mantiene exclusivamente dentro de este helper de traducción.
     ws.send(JSON.stringify({
       realtimeInput: {
         audio: {
-          mimeType: `audio/pcm;rate=${inputRate}`,
           data: chunk,
+          mimeType: `audio/pcm;rate=${inputRate}`,
         },
       },
     }));
@@ -302,17 +302,15 @@ export async function runGeminiLiveTranslate({
     if (wait > 0 && offset + chunkBytes < audio.length && !finished) await delay(wait);
   }
 
-  if (!finished) {
-    ws.send(JSON.stringify({ realtimeInput: { activityEnd: {} } }));
-    activityEnded = true;
-  }
+  inputFinished = true;
 
-  // Algunos turnos de audio entregan todos los chunks pero no un turnComplete
-  // inmediato. Solo cerramos por silencio DESPUÉS de haber recibido audio de salida.
+  // Live Translate funciona como flujo continuo, no por turnos. Para un archivo
+  // pregrabado, terminamos cuando ya se envió todo el audio y la salida dejó de
+  // crecer durante un intervalo breve. No se envían activityStart/activityEnd.
   const quietWatcher = setInterval(() => {
-    if (finished || !activityEnded || !collector.audio.length || !collector.lastAudioAt) return;
-    if (Date.now() - collector.lastAudioAt > 2200) finishOk();
-  }, 250);
+    if (finished || !inputFinished || !collector.audio.length || !collector.lastAudioAt) return;
+    if (Date.now() - collector.lastAudioAt > 1800) finishOk();
+  }, 200);
 
   try {
     return await done;
