@@ -156,6 +156,9 @@ async function runLiveOnce({
   inputRate = 16000,
   timeoutMs = 150000,
   schema = 'mediaChunks',
+  translationConfig = null,
+  inputAudioTranscription = false,
+  outputAudioTranscription = false,
 }) {
   const ws = await openSocket(liveEndpoint(apiKey));
   const collector = { text: [], transcripts: [], audio: [], audioMime: '' };
@@ -273,6 +276,14 @@ async function runLiveOnce({
     setup.inputAudioTranscription = {};
   }
 
+  // Live Translate usa una configuración dedicada de traducción. Estas opciones
+  // son opt-in para no alterar el flujo de dictado/transcripción que ya funciona.
+  if (inputAudioTranscription) setup.inputAudioTranscription = {};
+  if (outputAudioTranscription) setup.outputAudioTranscription = {};
+  if (translationConfig && typeof translationConfig === 'object') {
+    setup.translationConfig = translationConfig;
+  }
+
   ws.send(JSON.stringify({ setup }));
 
   const setupDeadline = Date.now() + 12000;
@@ -352,17 +363,24 @@ export async function runGeminiLiveAudio({
   audioBase64,
   inputRate = 16000,
   timeoutMs = 150000,
+  translationConfig = null,
+  inputAudioTranscription = false,
+  outputAudioTranscription = false,
+  schemas = ['mediaChunks', 'audio'],
 }) {
   const { value: apiKey } = getGeminiApiKey();
   const model = requireModel(modelEnv, modelLabel);
   let lastError = null;
 
-  // Compatibilidad entre las dos formas de audio usadas por revisiones de Gemini Live.
-  for (const schema of ['mediaChunks', 'audio']) {
+  // Por defecto conserva la compatibilidad previa. Los llamadores que conocen
+  // el esquema oficial de su modelo pueden limitarlo sin afectar a los demás.
+  const schemaList = Array.isArray(schemas) && schemas.length ? schemas : ['mediaChunks', 'audio'];
+  for (const schema of schemaList) {
     try {
       const collector = await runLiveOnce({
         apiKey, model, instruction, responseModality,
         audioBase64, inputRate, timeoutMs, schema,
+        translationConfig, inputAudioTranscription, outputAudioTranscription,
       });
       return { model, collector };
     } catch (error) {

@@ -5022,7 +5022,7 @@ ${detalle}`);
                         ${LANGUAGES.map(([label,code])=>`<option value="${elixAudioSafeText(label)}" data-code="${code}">${elixAudioSafeText(label)}</option>`).join('')}
                         <option value="__custom__">Otro idioma…</option>
                     </select>
-                    <input id="elix-audio-language-custom" type="text" maxlength="80" placeholder="Escribe el idioma de destino" style="display:none;margin-top:8px;">
+                    <input id="elix-audio-language-custom" type="text" maxlength="80" placeholder="Código de idioma (ej. es, en, fr-CA)" style="display:none;margin-top:8px;">
                 </div>
                 <div class="elix-audio-actions">
                     <button type="button" class="elix-audio-action" data-audio-cancel>Cancelar</button>
@@ -5102,7 +5102,11 @@ ${detalle}`);
         const languageSelect = modal.querySelector('#elix-audio-language');
         const customLanguage = modal.querySelector('#elix-audio-language-custom');
         let target = String(languageSelect?.value || '').trim();
-        if(target === '__custom__') target = String(customLanguage?.value || '').trim();
+        let targetCode = String(languageSelect?.selectedOptions?.[0]?.dataset?.code || '').trim();
+        if(target === '__custom__') {
+            target = String(customLanguage?.value || '').trim();
+            targetCode = target;
+        }
 
         if(!file){
             alert('Selecciona un archivo de audio.');
@@ -5110,6 +5114,10 @@ ${detalle}`);
         }
         if(!target){
             alert('Selecciona el idioma de destino.');
+            return;
+        }
+        if(!/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(targetCode)){
+            alert('Para “Otro idioma”, escribe un código de idioma válido, por ejemplo es, en, pt-BR o fr-CA.');
             return;
         }
 
@@ -5127,7 +5135,8 @@ ${detalle}`);
                 audio_transfer_id: transfer.transfer_id,
                 audio_chunks: transfer.total_chunks,
                 mime_type: prepared.mime_type,
-                target_language: target
+                target_language: target,
+                target_language_code: targetCode
             },{
                 etiqueta:`🌐 Elix AI traduciendo audio a ${target}`,
                 maxWaitMs: 5 * 60 * 1000
