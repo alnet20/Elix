@@ -8,7 +8,7 @@ import {
   deleteInputTransfer,
   putOutputAudio,
 } from './_shared/audio-store.mjs';
-import { runGeminiLiveAudio, finalizeAudio } from './_shared/live-audio.mjs';
+import { runGeminiLiveTranslate, finalizeTranslatedAudio } from './_shared/live-translate.mjs';
 
 const MAX_SECONDS = 30;
 const INPUT_RATE = 16000;
@@ -114,24 +114,15 @@ export const handler = async (event) => {
       throw err;
     }
 
-    const { collector } = await runGeminiLiveAudio({
-      modelEnv: 'GEMINI_TRANSLATE_LIVE_MODEL',
-      modelLabel: 'Gemini 3.5 Live Translate',
+    const { collector } = await runGeminiLiveTranslate({
       instruction,
-      responseModality: 'AUDIO',
+      targetLanguageCode: targetCode,
       audioBase64,
       inputRate: INPUT_RATE,
       timeoutMs: 180000,
-      // Traducción: usa un solo esquema de audio para evitar repetir un timeout
-      // completo. No añade campos nuevos al setup de Gemini Live.
-      schemas: ['mediaChunks'],
-      // Live Translate preview usa su configuración dedicada únicamente en
-      // este flujo. El dictado conserva v1beta y su setup anterior.
-      apiVersion: 'v1alpha',
-      translationConfig: { targetLanguageCode: targetCode },
     });
 
-    const audio = finalizeAudio(collector);
+    const audio = finalizeTranslatedAudio(collector);
     const translatedText = [...(collector?.text || []), ...(collector?.transcripts || [])]
       .map(s => String(s || '').trim()).filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
 

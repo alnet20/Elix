@@ -23,13 +23,9 @@ function requireModel(envName, label) {
   throw err;
 }
 
-function liveEndpoint(apiKey, apiVersion = 'v1beta') {
+function liveEndpoint(apiKey) {
   const configured = String(process.env.GEMINI_LIVE_WS_URL || '').trim();
-  // El endpoint configurado por variable conserva prioridad para los flujos existentes.
-  // Si no existe override, cada llamador puede elegir la versión del protocolo sin
-  // cambiar a los demás (dictado sigue en v1beta por defecto).
-  const version = String(apiVersion || 'v1beta').trim() || 'v1beta';
-  const base = configured || `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.${version}.GenerativeService.BidiGenerateContent`;
+  const base = configured || 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
   return `${base}${base.includes('?') ? '&' : '?'}key=${encodeURIComponent(apiKey)}`;
 }
 
@@ -160,10 +156,8 @@ async function runLiveOnce({
   inputRate = 16000,
   timeoutMs = 150000,
   schema = 'mediaChunks',
-  apiVersion = 'v1beta',
-  translationConfig = null,
 }) {
-  const ws = await openSocket(liveEndpoint(apiKey, apiVersion));
+  const ws = await openSocket(liveEndpoint(apiKey));
   const collector = { text: [], transcripts: [], audio: [], audioMime: '' };
   const cleanModel = String(model || '').replace(/^models\//, '');
   let finished = false;
@@ -279,13 +273,6 @@ async function runLiveOnce({
     setup.inputAudioTranscription = {};
   }
 
-  // Solo los llamadores que lo solicitan añaden la configuración de traducción.
-  // De este modo el dictado y cualquier otro flujo Live mantienen exactamente
-  // el setup anterior.
-  if (translationConfig && typeof translationConfig === 'object') {
-    setup.translationConfig = translationConfig;
-  }
-
   ws.send(JSON.stringify({ setup }));
 
   const setupDeadline = Date.now() + 12000;
@@ -365,22 +352,17 @@ export async function runGeminiLiveAudio({
   audioBase64,
   inputRate = 16000,
   timeoutMs = 150000,
-  schemas = ['mediaChunks', 'audio'],
-  apiVersion = 'v1beta',
-  translationConfig = null,
 }) {
   const { value: apiKey } = getGeminiApiKey();
   const model = requireModel(modelEnv, modelLabel);
   let lastError = null;
 
-  // Mantiene el comportamiento anterior por defecto. Un llamador puede
-  // limitar el esquema sin alterar los demás flujos de audio.
-  const schemaList = Array.isArray(schemas) && schemas.length ? schemas : ['mediaChunks', 'audio'];
-  for (const schema of schemaList) {
+  // Compatibilidad entre las dos formas de audio usadas por revisiones de Gemini Live.
+  for (const schema of ['mediaChunks', 'audio']) {
     try {
       const collector = await runLiveOnce({
         apiKey, model, instruction, responseModality,
-        audioBase64, inputRate, timeoutMs, schema, apiVersion, translationConfig,
+        audioBase64, inputRate, timeoutMs, schema,
       });
       return { model, collector };
     } catch (error) {
