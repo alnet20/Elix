@@ -218,6 +218,27 @@ export async function runGeminiLiveTranslate({
     }
 
     extractServerContent(message, collector);
+
+    // La Live API distingue entre generación terminada y turno terminado.
+    // generationComplete llega cuando el modelo ya terminó de producir la
+    // salida; turnComplete puede demorarse porque el servidor asume que el
+    // audio se está reproduciendo en tiempo real. Para un archivo pregrabado
+    // ya completamente enviado, generationComplete es la señal correcta para
+    // guardar inmediatamente el audio recibido.
+    const server = message.serverContent || message.server_content || {};
+    const generationComplete = Boolean(server.generationComplete || server.generation_complete);
+    const turnComplete = Boolean(server.turnComplete || server.turn_complete);
+    const waitingForInput = Boolean(server.waitingForInput || server.waiting_for_input);
+
+    if (inputFinished && collector.audio.length && (generationComplete || turnComplete || waitingForInput)) {
+      const reason = generationComplete
+        ? 'generationComplete'
+        : (turnComplete ? 'turnComplete' : 'waitingForInput');
+      console.log(
+        `Elix AI · Live Translate completado: ${reason} · audio salida: ${collector.audio.length} chunks`
+      );
+      finishOk();
+    }
   });
 
   ws.addEventListener('close', event => {
