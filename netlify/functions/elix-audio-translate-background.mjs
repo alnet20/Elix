@@ -10,7 +10,7 @@ import {
 } from './_shared/audio-store.mjs';
 import { runGeminiLiveTranslate, finalizeTranslatedAudio } from './_shared/live-translate.mjs';
 
-const MAX_SECONDS = 30;
+const MAX_SECONDS = 60;
 const INPUT_RATE = 16000;
 const MAX_BYTES = MAX_SECONDS * INPUT_RATE * 2 + 4096;
 const LANG_RX = /^[\p{L}\p{M} .,'’()\-]{2,80}$/u;
