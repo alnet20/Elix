@@ -277,15 +277,28 @@ async function runLiveOnce({
     throw Object.assign(new Error('El audio está vacío.'), { statusCode: 400 });
   }
 
-  const chunkBytes = 32000; // ~1 s de PCM16 mono a 16 kHz
+  // Gemini Live espera entrada realmente progresiva. Antes se enviaban bloques de ~1 s
+  // prácticamente de golpe; los modelos Live especializados pueden abortar esa ráfaga.
+  // Enviamos ~100 ms de PCM16 mono a 16 kHz y respetamos el ritmo del audio.
+  const bytesPerSecond = Math.max(1, Number(inputRate) || 16000) * 2; // PCM16 mono
+  const chunkMs = 100;
+  const chunkBytes = Math.max(320, Math.round(bytesPerSecond * (chunkMs / 1000)));
+
   for (let offset = 0; offset < audio.length; offset += chunkBytes) {
     if (finished) break;
+
+    const startedAt = Date.now();
     const chunk = audio.subarray(offset, Math.min(audio.length, offset + chunkBytes)).toString('base64');
     const realtimeInput = schema === 'audio'
       ? { audio: { mimeType: `audio/pcm;rate=${inputRate}`, data: chunk } }
       : { mediaChunks: [{ mimeType: `audio/pcm;rate=${inputRate}`, data: chunk }] };
+
     ws.send(JSON.stringify({ realtimeInput }));
-    if ((offset / chunkBytes) % 6 === 5) await delay(8);
+
+    // Mantener el envío cercano al tiempo real en lugar de inundar el WebSocket.
+    const elapsed = Date.now() - startedAt;
+    const wait = chunkMs - elapsed;
+    if (wait > 0 && offset + chunkBytes < audio.length && !finished) await delay(wait);
   }
 
   if (!finished) {
