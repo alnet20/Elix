@@ -82,7 +82,15 @@ function extractServerContent(message, collector) {
     message.outputTranscription?.text ||
     '';
   if (typeof outputTranscript === 'string' && outputTranscript.trim()) {
+    const normalized = outputTranscript.trim();
     collector.transcripts.push(outputTranscript);
+    // Live Translate es un flujo continuo y puede no emitir generationComplete/turnComplete.
+    // Marcamos actividad textual solo cuando el contenido cambia; así mensajes repetidos
+    // durante el silencio final no mantienen vivo el trabajo indefinidamente.
+    if (normalized !== collector.lastOutputTranscriptText) {
+      collector.lastOutputTranscriptText = normalized;
+      collector.lastOutputTranscriptAt = Date.now();
+    }
   }
 }
 
@@ -161,11 +169,14 @@ export async function runGeminiLiveTranslate({
     audio: [],
     audioMime: '',
     lastAudioAt: 0,
+    lastOutputTranscriptAt: 0,
+    lastOutputTranscriptText: '',
   };
 
   let finished = false;
   let setupDone = false;
   let inputFinished = false;
+  let inputFinishedAt = 0;
   let resolveRun;
   let rejectRun;
 
@@ -326,6 +337,7 @@ export async function runGeminiLiveTranslate({
   }
 
   inputFinished = true;
+  inputFinishedAt = Date.now();
 
   // Para un archivo pregrabado el flujo sí tiene un final físico. Con la
   // detección automática de actividad activa (valor predeterminado), la Live API
@@ -339,11 +351,40 @@ export async function runGeminiLiveTranslate({
     }));
   }
 
-  // Live Translate funciona como flujo continuo. Para este archivo pregrabado,
-  // cerramos cuando la salida dejó de crecer durante un intervalo breve.
+  // Live Translate NO es un agente por turnos: la guía oficial lo describe como
+  // procesamiento continuo. En la práctica puede seguir enviando frames de audio
+  // (silencio/cola de reproducción) después de que la traducción hablada y su
+  // transcripción ya terminaron, por lo que esperar a que cesen TODOS los chunks
+  // puede dejar una Background Function viva hasta el timeout.
+  //
+  // Para archivos finitos cerramos cuando la transcripción de salida se estabiliza
+  // durante 3 s después de audioStreamEnd. Google indica que las transcripciones de
+  // salida forman parte de la generación y se envían cerca del audio correspondiente.
+  // Dejamos además un margen mínimo de 1.5 s tras el fin de entrada para recoger la cola.
+  // Si por alguna razón no llegan transcripciones nuevas, un salvavidas de 20 s tras
+  // el fin de entrada devuelve el audio ya recibido en vez de esperar 180 s.
   const quietWatcher = setInterval(() => {
-    if (finished || !inputFinished || !collector.audio.length || !collector.lastAudioAt) return;
-    if (Date.now() - collector.lastAudioAt > 1800) finishOk();
+    if (finished || !inputFinished || !collector.audio.length) return;
+    const now = Date.now();
+    const sinceInputEnd = inputFinishedAt ? now - inputFinishedAt : 0;
+    const transcriptStableFor = collector.lastOutputTranscriptAt
+      ? now - collector.lastOutputTranscriptAt
+      : 0;
+
+    if (collector.lastOutputTranscriptAt && sinceInputEnd >= 1500 && transcriptStableFor >= 3000) {
+      console.log(
+        `Elix AI · Live Translate completado: salida estabilizada · audio salida: ${collector.audio.length} chunks`
+      );
+      finishOk();
+      return;
+    }
+
+    if (sinceInputEnd >= 20000) {
+      console.log(
+        `Elix AI · Live Translate completado: cierre de seguridad post-entrada · audio salida: ${collector.audio.length} chunks`
+      );
+      finishOk();
+    }
   }, 200);
 
   try {
