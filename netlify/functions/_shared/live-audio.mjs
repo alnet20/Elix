@@ -163,6 +163,8 @@ async function runLiveOnce({
   let finished = false;
   let setupDone = false;
   let firstContentAt = 0;
+  let lastContentAt = 0;
+  let inputEnded = false;
   let resolveRun, rejectRun;
 
   const donePromise = new Promise((resolve, reject) => {
@@ -195,7 +197,11 @@ async function runLiveOnce({
     const before = collector.text.length + collector.transcripts.length + collector.audio.length;
     extractTextAndAudio(message, collector);
     const after = collector.text.length + collector.transcripts.length + collector.audio.length;
-    if (after > before && !firstContentAt) firstContentAt = Date.now();
+    if (after > before) {
+      const now = Date.now();
+      if (!firstContentAt) firstContentAt = now;
+      lastContentAt = now;
+    }
 
     if (detectTurnComplete(message) && !finished) {
       finished = true;
@@ -247,18 +253,27 @@ async function runLiveOnce({
     ));
   });
 
-  ws.send(JSON.stringify({
-    setup: {
-      model: `models/${cleanModel}`,
-      generationConfig: {
-        responseModalities: [responseModality],
-        temperature: 0,
-      },
-      systemInstruction: {
-        parts: [{ text: instruction }],
-      },
+  const setup = {
+    model: `models/${cleanModel}`,
+    generationConfig: {
+      responseModalities: [responseModality],
+      temperature: 0,
     },
-  }));
+    systemInstruction: {
+      parts: [{ text: instruction }],
+    },
+  };
+
+  // Los modelos dedicados a transcripción de Gemini Live entregan el texto
+  // como transcripción de la ENTRADA de audio, no necesariamente como un
+  // turno normal del modelo. Sin esta opción la sesión puede confirmar el
+  // setup, aceptar PCM y permanecer sin producir contenido hasta que Google
+  // la cierre por inactividad (1008 / "The operation was aborted").
+  if (/transcribe/i.test(cleanModel)) {
+    setup.inputAudioTranscription = {};
+  }
+
+  ws.send(JSON.stringify({ setup }));
 
   const setupDeadline = Date.now() + 12000;
   while (!setupDone && Date.now() < setupDeadline && !finished) await delay(50);
@@ -303,16 +318,22 @@ async function runLiveOnce({
 
   if (!finished) {
     ws.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+    inputEnded = true;
   }
 
-  // Si el servidor no emite turnComplete pero ya devolvió contenido,
-  // un cierre controlado tras un breve silencio evita esperar indefinidamente.
+  // La transcripción de entrada puede no producir un modelTurn/turnComplete.
+  // Cuando el audio ya terminó y llevamos un breve periodo sin nuevos fragmentos
+  // de texto, la transcripción recibida se considera completa y cerramos limpio.
   const quietWatcher = setInterval(() => {
-    if (finished || !firstContentAt) return;
-    if (Date.now() - firstContentAt > 4500) {
-      firstContentAt = Date.now(); // solo extiende si llegan más mensajes; el close resolverá si hay datos
+    if (finished || !inputEnded || !lastContentAt) return;
+    const hasData = collector.text.length || collector.transcripts.length || collector.audio.length;
+    if (hasData && Date.now() - lastContentAt > 1800) {
+      finished = true;
+      clearTimeout(hardTimer);
+      try { ws.close(); } catch {}
+      resolveRun(collector);
     }
-  }, 1000);
+  }, 250);
 
   try {
     return await donePromise;
