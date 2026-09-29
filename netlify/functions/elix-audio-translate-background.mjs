@@ -15,6 +15,20 @@ const INPUT_RATE = 16000;
 const MAX_BYTES = MAX_SECONDS * INPUT_RATE * 2 + 4096;
 const LANG_RX = /^[\p{L}\p{M} .,'’()\-]{2,80}$/u;
 
+const TARGET_LANGUAGE_CODES = new Map([
+  ['español', 'es'], ['english', 'en'], ['français', 'fr'], ['deutsch', 'de'],
+  ['italiano', 'it'], ['português', 'pt'], ['中文', 'zh'], ['日本語', 'ja'],
+  ['한국어', 'ko'], ['العربية', 'ar'], ['русский', 'ru'], ['हिन्दी', 'hi'],
+  ['nederlands', 'nl'], ['polski', 'pl'], ['türkçe', 'tr'], ['bahasa indonesia', 'id'],
+  ['українська', 'uk'], ['tiếng việt', 'vi'],
+]);
+
+function targetLanguageCode(target) {
+  const raw = String(target || '').trim();
+  const direct = raw.match(/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/) ? raw : '';
+  return direct || TARGET_LANGUAGE_CODES.get(raw.toLocaleLowerCase('und')) || '';
+}
+
 function validate(body) {
   const target = String(body.target_language || '').trim();
   if (!target || !LANG_RX.test(target)) {
@@ -93,6 +107,12 @@ export const handler = async (event) => {
     }
 
     const instruction = `Traduce fielmente todo el contenido hablado del audio al idioma de destino: ${validated.target}. Mantén el significado, nombres propios, cifras, unidades y tono comunicativo. No resumas ni añadas información. Devuelve únicamente el audio hablado de la traducción, sin introducciones ni comentarios.`;
+    const targetCode = targetLanguageCode(validated.target);
+    if (!targetCode) {
+      const err = new Error('El idioma seleccionado todavía no tiene un código compatible para Live Translate.');
+      err.statusCode = 400;
+      throw err;
+    }
 
     const { collector } = await runGeminiLiveAudio({
       modelEnv: 'GEMINI_TRANSLATE_LIVE_MODEL',
@@ -105,6 +125,10 @@ export const handler = async (event) => {
       // Traducción: usa un solo esquema de audio para evitar repetir un timeout
       // completo. No añade campos nuevos al setup de Gemini Live.
       schemas: ['mediaChunks'],
+      // Live Translate preview usa su configuración dedicada únicamente en
+      // este flujo. El dictado conserva v1beta y su setup anterior.
+      apiVersion: 'v1alpha',
+      translationConfig: { targetLanguageCode: targetCode },
     });
 
     const audio = finalizeAudio(collector);
