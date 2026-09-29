@@ -14,18 +14,11 @@ const MAX_SECONDS = 30;
 const INPUT_RATE = 16000;
 const MAX_BYTES = MAX_SECONDS * INPUT_RATE * 2 + 4096;
 const LANG_RX = /^[\p{L}\p{M} .,'’()\-]{2,80}$/u;
-const LANG_CODE_RX = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/;
 
 function validate(body) {
   const target = String(body.target_language || '').trim();
-  const targetCode = String(body.target_language_code || '').trim();
   if (!target || !LANG_RX.test(target)) {
     const err = new Error('Selecciona un idioma de destino válido.');
-    err.statusCode = 400;
-    throw err;
-  }
-  if (!targetCode || !LANG_CODE_RX.test(targetCode)) {
-    const err = new Error('El idioma de destino necesita un código válido, por ejemplo es, en o fr-CA.');
     err.statusCode = 400;
     throw err;
   }
@@ -41,7 +34,6 @@ function validate(body) {
   if (transferRaw) {
     return {
       target,
-      targetCode,
       transferId: assertTransferId(transferRaw),
       totalChunks: assertChunkCount(body.audio_chunks),
       directB64: '',
@@ -54,7 +46,7 @@ function validate(body) {
     err.statusCode = 413;
     throw err;
   }
-  return { target, targetCode, transferId: '', totalChunks: 0, directB64 };
+  return { target, transferId: '', totalChunks: 0, directB64 };
 }
 
 function outputId() {
@@ -110,16 +102,8 @@ export const handler = async (event) => {
       audioBase64,
       inputRate: INPUT_RATE,
       timeoutMs: 180000,
-      // Configuración específica del modelo Live Translate. Se aplica solo aquí:
-      // el dictado continúa usando exactamente su configuración anterior.
-      translationConfig: {
-        targetLanguageCode: validated.targetCode,
-        echoTargetLanguage: false,
-      },
-      inputAudioTranscription: true,
-      outputAudioTranscription: true,
-      // Live Translate usa realtimeInput.mediaChunks. Evitamos un segundo intento
-      // de 180 s con un esquema alternativo que antes duplicaba el timeout total.
+      // Traducción: usa un solo esquema de audio para evitar repetir un timeout
+      // completo. No añade campos nuevos al setup de Gemini Live.
       schemas: ['mediaChunks'],
     });
 
