@@ -4609,6 +4609,12 @@ ${detalle}`);
         position: relative;
         flex: 0 0 auto;
     }
+    .elix-audio-btn svg {
+        width: 20px;
+        height: 20px;
+        display: block;
+        pointer-events: none;
+    }
     .elix-audio-btn.elix-recording {
         outline: 2px solid #ef4444;
         outline-offset: 2px;
@@ -4726,6 +4732,9 @@ ${detalle}`);
     const AUDIO_INPUT_RATE = 16000;
     const MAX_DICTATION_SECONDS = 60;
     const MAX_TRANSLATION_SECONDS = 30;
+    // ~96 KiB de Base64 por petición: mantiene cada subida muy por debajo
+    // de los límites de tamaño de una Function sin reducir la duración del audio.
+    const AUDIO_UPLOAD_CHARS = 96 * 1024;
 
     let recorder = null;
     let recorderStream = null;
@@ -4821,6 +4830,57 @@ ${detalle}`);
             duration: rendered.duration,
             mime_type: `audio/pcm;rate=${AUDIO_INPUT_RATE}`
         };
+    }
+
+    function elixAudioTransferId(){
+        const uuid = (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function')
+            ? globalThis.crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+        return `elixaudio-${uuid}`.replace(/[^a-zA-Z0-9_-]/g,'');
+    }
+
+    async function elixUploadAudioForTranslation(audioBase64){
+        const b64 = String(audioBase64 || '');
+        if(!b64) throw new Error('El audio preparado está vacío.');
+        if(typeof window.elixBackend !== 'function') throw new Error('Elix AI no pudo iniciar la subida segura del audio.');
+
+        const transferId = elixAudioTransferId();
+        const totalChunks = Math.max(1, Math.ceil(b64.length / AUDIO_UPLOAD_CHARS));
+
+        try{
+            for(let index=0; index<totalChunks; index++){
+                const start = index * AUDIO_UPLOAD_CHARS;
+                const chunk = b64.slice(start, start + AUDIO_UPLOAD_CHARS);
+                elixAudioSetLoading(true,`📤 Elix AI preparando audio · ${index + 1}/${totalChunks}`);
+                await window.elixBackend('elix-audio-upload-chunk',{
+                    transfer_id: transferId,
+                    index,
+                    total_chunks: totalChunks,
+                    chunk
+                });
+            }
+            return { transfer_id: transferId, total_chunks: totalChunks };
+        }catch(error){
+            try{
+                await window.elixBackend('elix-audio-upload-chunk',{
+                    action:'cleanup',
+                    transfer_id: transferId,
+                    total_chunks: totalChunks
+                });
+            }catch(_){ }
+            throw error;
+        }
+    }
+
+    async function elixCleanupAudioTransfer(transfer){
+        if(!transfer?.transfer_id || !transfer?.total_chunks || typeof window.elixBackend !== 'function') return;
+        try{
+            await window.elixBackend('elix-audio-upload-chunk',{
+                action:'cleanup',
+                transfer_id: transfer.transfer_id,
+                total_chunks: transfer.total_chunks
+            });
+        }catch(_){ }
     }
 
     function elixInsertTextAtCursor(text){
@@ -4993,10 +5053,18 @@ ${detalle}`);
     }
 
     function elixRenderTranslatedAudio(result,sourceName,targetLanguage){
-        const b64 = String(result?.audio_base64 || '');
-        if(!b64) throw new Error('Elix AI no devolvió el audio traducido.');
         const mime = String(result?.mime_type || 'audio/wav');
-        const {url} = elixBase64ToBlobUrl(b64,mime);
+        let sourceUrl = String(result?.audio_url || '').trim();
+        let objectUrl = '';
+
+        // Compatibilidad con resultados antiguos que todavía devolvían Base64.
+        if(!sourceUrl){
+            const b64 = String(result?.audio_base64 || '');
+            if(!b64) throw new Error('Elix AI no devolvió el audio traducido.');
+            const converted = elixBase64ToBlobUrl(b64,mime);
+            objectUrl = converted.url;
+            sourceUrl = objectUrl;
+        }
 
         const chat = document.getElementById('chat-history');
         if(!chat) return;
@@ -5005,19 +5073,27 @@ ${detalle}`);
         row.className = 'message-row ai';
         const safeTarget = elixAudioSafeText(targetLanguage);
         const safeName = elixAudioSafeText(sourceName || 'audio');
+        const safeSource = elixAudioSafeText(sourceUrl);
+        const extension = /wav/i.test(mime) ? 'wav' : (/mpeg|mp3/i.test(mime) ? 'mp3' : 'audio');
         row.innerHTML = `
             <div class="avatar avatar-ai">E</div>
             <div class="message-content">
                 <div><strong>Audio traducido a ${safeTarget}</strong></div>
                 <div class="elix-audio-result">
                     <div style="color:#a1a1aa;font-size:.8rem;">${safeName}</div>
-                    <audio controls preload="metadata" src="${url}"></audio>
+                    <audio controls preload="metadata" src="${safeSource}"></audio>
                     <br>
-                    <a class="elix-audio-download" href="${url}" download="Elix-AI-audio-traducido.wav">Descargar audio traducido</a>
+                    <a class="elix-audio-download" href="${safeSource}" download="Elix-AI-audio-traducido.${extension}">Descargar audio traducido</a>
                 </div>
             </div>`;
         chat.appendChild(row);
         chat.scrollTop = chat.scrollHeight;
+
+        // Los blob: antiguos se liberan cuando el elemento se descarte.
+        // Las nuevas traducciones usan una URL interna de Elix y no necesitan Base64 en el chat.
+        if(objectUrl){
+            row.dataset.elixAudioObjectUrl = objectUrl;
+        }
     }
 
     async function elixTranslateSelectedAudio(modal,translateButton,cancelButton){
@@ -5042,10 +5118,14 @@ ${detalle}`);
         cancelButton.disabled = true;
         elixAudioSetLoading(true,`🌐 Elix AI traduciendo audio a ${target}...`);
 
+        let transfer = null;
         try{
             const prepared = await elixAudioToPcm16(file,MAX_TRANSLATION_SECONDS);
+            transfer = await elixUploadAudioForTranslation(prepared.audio_base64);
+
             const result = await window.elixBackground('elix-audio-translate',{
-                audio_base64: prepared.audio_base64,
+                audio_transfer_id: transfer.transfer_id,
+                audio_chunks: transfer.total_chunks,
                 mime_type: prepared.mime_type,
                 target_language: target
             },{
@@ -5053,9 +5133,12 @@ ${detalle}`);
                 maxWaitMs: 5 * 60 * 1000
             });
 
+            // La Background Function elimina los fragmentos de entrada al terminar.
+            transfer = null;
             modal.remove();
             elixRenderTranslatedAudio(result,file.name,target);
         }catch(error){
+            await elixCleanupAudioTransfer(transfer);
             console.error('Elix AI · traducción de audio:',error);
             alert(`No se pudo traducir el audio.\n\n${elixAudioFriendlyError(error)}`);
         }finally{
@@ -5079,7 +5162,7 @@ ${detalle}`);
         translateBtn.className = 'btn-icon elix-audio-btn';
         translateBtn.title = 'Traducir un audio a otro idioma';
         translateBtn.setAttribute('aria-label','Traducir audio');
-        translateBtn.textContent = '🌐';
+        translateBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17A15.66 15.66 0 0 1 9 11.35 15.59 15.59 0 0 1 6.91 8h-2a17.5 17.5 0 0 0 2.76 4.58L2.58 17.59 4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7 1.62-4.33L19.12 17h-3.24z"/></svg>`;
         translateBtn.onclick = elixOpenTranslateModal;
 
         const micBtn = document.createElement('button');
